@@ -25,6 +25,8 @@ class ParseStatus(Enum):
     CONTENT_DIV = 2
     CONTENT_IMAGE = 3
 
+newline = "\n"
+
 class LinkTextExtractor(HTMLParser):
     def __init__(self, substrings_to_find: list[str], current_url: str):
         super().__init__()
@@ -34,17 +36,24 @@ class LinkTextExtractor(HTMLParser):
         self.status = ParseStatus.NOT_STARTED
         self.block_image_element = None
         self.div_level = 0
+        self.post_link = None
+        self.title_count = 0
+        self.content_links = []
 
     def handle_starttag(self, tag, attrs):
         match(self.status):
             case ParseStatus.NOT_STARTED:
                 if attrs and in_attr(attrs, "class", "wp-block-post-title"):
                     self.status = ParseStatus.TITLE
+                    self.title_count += 1
             
             case ParseStatus.TITLE:
-                if tag == 'div':
-                    self.status = ParseStatus.CONTENT_DIV
-                    self.div_level += 1
+                match(tag):
+                    case 'div':
+                        self.status = ParseStatus.CONTENT_DIV
+                        self.div_level += 1
+                    case 'a':
+                        self.post_link = get_attr(attrs, "href")
 
             case ParseStatus.CONTENT_DIV:
                 if attrs and in_attr(attrs, "class", "wp-block-image"):
@@ -56,7 +65,7 @@ class LinkTextExtractor(HTMLParser):
                     case 'a':
                         if self.current_title:
                             link = get_attr(attrs, "href")
-                            print(link)
+                            self.content_links.append(link)
 
                     case 'div':
                         self.div_level += 1
@@ -77,6 +86,13 @@ class LinkTextExtractor(HTMLParser):
                         self.div_level = 0
                     if self.div_level == 0:
                         self.status = ParseStatus.NOT_STARTED
+                        if self.current_title:
+                            print(f"""{self.current_url}, position {self.title_count}
+{self.current_title}
+{self.post_link}
+{newline.join(self.content_links)}""")
+                        self.post_link = None
+                        self.content_links = []
 
             # preview image closed
             case ParseStatus.CONTENT_IMAGE:
@@ -95,7 +111,6 @@ class LinkTextExtractor(HTMLParser):
                 for s in self.substrings_to_find:
                     if s in data:
                         self.current_title = data
-                        print(f"{s} found in {self.current_url}: {self.current_title}")
                         return
                 # If no title match, reset
                 self.current_title = None
@@ -111,26 +126,31 @@ def read_keywords_from_file(filepath: str) -> list[str]:
     return keywords
 
 def crawl_site(keywords: list[str], url_prefix: str, start_page: int = 0, end_page: int = 0):
-    for i in range(start_page, end_page):
-        page_url = f"{url_prefix}/{i}"
-        try:
-            logging.info(f"opening pageg {page_url}")
-            with urllib.request.urlopen(page_url) as response:
-                html_content = response.read().decode('utf-8')
-            parser = LinkTextExtractor(keywords, page_url)
-            parser.feed(html_content)
+    page_count = 0
+    try:
+        for i in range(start_page, end_page):
+            page_url = f"{url_prefix}/{i}"
+            try:
+                logging.debug(f"opening pageg {page_url}")
+                with urllib.request.urlopen(page_url) as response:
+                    html_content = response.read().decode('utf-8')
+                parser = LinkTextExtractor(keywords, page_url)
+                parser.feed(html_content)
+                page_count += 1
 
-        except urllib.error.URLError as e:
-            print(f"  Error visiting {page_url}: {e.reason}")
-        except Exception as e:
-            print(f"  An unexpected error occurred for {page_url}: {e}")
+            except urllib.error.URLError as e:
+                print(f"  Error visiting {page_url}: {e.reason}")
+            except Exception as e:
+                print(f"  An unexpected error occurred for {page_url}: {e}")
 
-        # Wait for 10 seconds before the next request
-        if i < end_page - 1:
-            logging.debug(f"Waiting for 10 seconds before visiting the next page...")
-            time.sleep(10)
+            # Wait for 10 seconds before the next request
+            if i < end_page - 1:
+                logging.debug(f"Waiting for 10 seconds before visiting the next page...")
+                time.sleep(10)
+    finally:
+        logging.info(f"{page_count} pages crawled")
 
-    logging.info("Crawling finished.")
+    logging.info("Success")
 
 
 if __name__ == "__main__":
@@ -145,7 +165,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--url_prefix",
         type=str,
-        default="https://site.com",
     )
     parser.add_argument(
         "--start",
@@ -160,7 +179,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--log_level",
         type=str,
-        default="debug",
+        default="info",
         choices=["debug", "info", "warning", "error", "critical"]
     )
 
