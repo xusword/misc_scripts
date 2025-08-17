@@ -30,7 +30,7 @@ newline = "\n"
 class LinkTextExtractor(HTMLParser):
     def __init__(self, substrings_to_find: list[str], current_url: str):
         super().__init__()
-        self.substrings_to_find = substrings_to_find
+        self.substrings_to_find = [s.upper() for s in substrings_to_find]
         self.current_url = current_url
         self.in_title = False
         self.status = ParseStatus.NOT_STARTED
@@ -106,10 +106,11 @@ class LinkTextExtractor(HTMLParser):
         if not data.strip():
             return
         
+        data_upper = data.upper()
         match(self.status):
             case ParseStatus.TITLE:
                 for s in self.substrings_to_find:
-                    if s in data:
+                    if s in data_upper:
                         self.current_title = data
                         return
                 # If no title match, reset
@@ -127,21 +128,32 @@ def read_keywords_from_file(filepath: str) -> list[str]:
 
 def crawl_site(keywords: list[str], url_prefix: str, start_page: int = 0, end_page: int = 0):
     page_count = 0
+    fail_pages = []
     try:
         for i in range(start_page, end_page):
             page_url = f"{url_prefix}/{i}"
+            success = False
             try:
-                logging.debug(f"opening pageg {page_url}")
+                msg = f"opening pageg {page_url}"
+                if i % 10 == 0:
+                    logging.info(msg)
+                else:
+                    logging.debug(msg)
                 with urllib.request.urlopen(page_url) as response:
                     html_content = response.read().decode('utf-8')
                 parser = LinkTextExtractor(keywords, page_url)
                 parser.feed(html_content)
-                page_count += 1
+                success = True
 
             except urllib.error.URLError as e:
-                print(f"  Error visiting {page_url}: {e.reason}")
+                logging.error(f"Error visiting {page_url}: {e.reason}")
             except Exception as e:
-                print(f"  An unexpected error occurred for {page_url}: {e}")
+                logging.error(f"An unexpected error occurred for {page_url}: {e}")
+            finally:
+                if success:                
+                    page_count += 1
+                else:
+                    fail_pages.append(i)
 
             # Wait for 10 seconds before the next request
             if i < end_page - 1:
@@ -149,6 +161,8 @@ def crawl_site(keywords: list[str], url_prefix: str, start_page: int = 0, end_pa
                 time.sleep(10)
     finally:
         logging.info(f"{page_count} pages crawled")
+        if fail_pages:
+            logging.info(f"{len(fail_pages)} pages failed: [{', '.join(map(str, fail_pages))}]")
 
     logging.info("Success")
 
@@ -165,6 +179,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--url_prefix",
         type=str,
+        default="https://example.com",
     )
     parser.add_argument(
         "--start",
