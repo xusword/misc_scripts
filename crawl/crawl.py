@@ -134,7 +134,7 @@ def crawl_site(keywords: list[str], url_prefix: str, start_page: int = 0, end_pa
             page_url = f"{url_prefix}/{i}"
             success = False
             try:
-                msg = f"opening pageg {page_url}"
+                msg = f"opening page {page_url}"
                 if i % 10 == 0:
                     logging.info(msg)
                 else:
@@ -180,6 +180,7 @@ if __name__ == "__main__":
         "--url_prefix",
         type=str,
         default="https://example.com",
+        help="prefix, no slash",
     )
     parser.add_argument(
         "--start",
