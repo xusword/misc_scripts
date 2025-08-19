@@ -1,8 +1,10 @@
 import argparse
 import logging
+import os
 import time
 import urllib.request
 
+from abc import abstractmethod
 from enum import Enum
 from html.parser import HTMLParser
 
@@ -27,25 +29,34 @@ class ParseStatus(Enum):
 
 newline = "\n"
 
-class LinkTextExtractor(HTMLParser):
-    def __init__(self, substrings_to_find: list[str], current_url: str):
+class SiteCrawler(HTMLParser):
+    def __init__(self, current_url: str):
         super().__init__()
-        self.substrings_to_find = [s.upper() for s in substrings_to_find]
         self.current_url = current_url
         self.in_title = False
         self.status = ParseStatus.NOT_STARTED
         self.block_image_element = None
         self.div_level = 0
         self.post_link = None
-        self.title_count = 0
+        self.current_title = None
+        self.title_position = 0
         self.content_links = []
+        self.is_done = False
+
+    @abstractmethod
+    def handle_post_end(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def handle_post_title(self):
+        raise NotImplementedError()
 
     def handle_starttag(self, tag, attrs):
         match(self.status):
             case ParseStatus.NOT_STARTED:
                 if attrs and in_attr(attrs, "class", "wp-block-post-title"):
                     self.status = ParseStatus.TITLE
-                    self.title_count += 1
+                    self.title_position += 1
             
             case ParseStatus.TITLE:
                 match(tag):
@@ -63,9 +74,8 @@ class LinkTextExtractor(HTMLParser):
                 
                 match(tag):
                     case 'a':
-                        if self.current_title:
-                            link = get_attr(attrs, "href")
-                            self.content_links.append(link)
+                        link = get_attr(attrs, "href")
+                        self.content_links.append(link)
 
                     case 'div':
                         self.div_level += 1
@@ -86,11 +96,8 @@ class LinkTextExtractor(HTMLParser):
                         self.div_level = 0
                     if self.div_level == 0:
                         self.status = ParseStatus.NOT_STARTED
-                        if self.current_title:
-                            print(f"""{self.current_url}, position {self.title_count}
-{self.current_title}
-{self.post_link}
-{newline.join(self.content_links)}""")
+                        self.handle_post_end()
+                        self.current_title = None
                         self.post_link = None
                         self.content_links = []
 
@@ -106,15 +113,74 @@ class LinkTextExtractor(HTMLParser):
         if not data.strip():
             return
         
-        data_upper = data.upper()
         match(self.status):
             case ParseStatus.TITLE:
-                for s in self.substrings_to_find:
-                    if s in data_upper:
-                        self.current_title = data
-                        return
-                # If no title match, reset
-                self.current_title = None
+                self.current_title = data
+                self.handle_post_title(data)
+
+    def __enter__(self):
+        pass
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class LinkTextExtractor(SiteCrawler):
+    def __init__(self, substrings_to_find: list[str], current_url: str):
+        super().__init__(current_url)
+        self.substrings_to_find = [s.upper() for s in substrings_to_find]
+        self.matched_title = None
+
+    def handle_post_end(self):
+        if self.matched_title:
+            print(f"""{self.current_url}, position {self.title_position}
+{self.matched_title}
+{self.post_link}
+{newline.join(self.content_links)}""")
+
+    def handle_post_title(self, data: str):
+        data_upper = data.upper()
+        for s in self.substrings_to_find:
+            if s in data_upper:
+                self.matched_title = data
+                return
+        # If no title match, reset
+        self.matched_title = None
+
+
+class SiteExporter(SiteCrawler):
+    def __init__(self, current_url: str, file_path: str, last_poll, append_mode):
+        super().__init__(current_url)
+        self.last_poll = last_poll
+        self.append_mode = append_mode
+        self.out_file = open(file_path, "a" if append_mode else "w", encoding="utf-8")
+
+    def handle_post_title(self, data: str):
+        if self.is_done:
+            return
+
+    def handle_post_end(self):
+        if self.is_done:
+            return
+        
+        if self.content_links:
+            linked_file = self.content_links[0].split("/")[-1]
+        else:
+            linked_file = "N/A"
+
+        if ";" in self.current_title:
+            logging.warning(f"Title contains semicolon: {self.current_title}")
+            
+        out_line = f"{self.current_title};{self.post_link};{linked_file}"
+        if out_line == self.last_poll:
+            self.is_done = True
+            logging.info(f"Reached last poll {self.current_title}")
+            return
+        self.out_file.write(out_line + newline)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.out_file:
+            self.out_file.close()
 
 
 def read_keywords_from_file(filepath: str) -> list[str]:
@@ -126,9 +192,19 @@ def read_keywords_from_file(filepath: str) -> list[str]:
                 keywords.append(stripped_line)
     return keywords
 
-def crawl_site(keywords: list[str], url_prefix: str, start_page: int = 0, end_page: int = 0):
+def crawl_site(args, url_prefix: str, start_page: int = 0, end_page: int = 0):
     page_count = 0
     fail_pages = []
+    
+    if args.action == "list" or args.action == "extend_list":
+        export_to_file = "db.csv"
+        if os.path.exists(export_to_file):
+            with open(export_to_file, 'r', encoding="utf-8") as file:
+                last_poll = file.readline()
+        else:
+            last_poll = None
+        append_mode = (args.action == "extend_list")
+
     try:
         for i in range(start_page, end_page):
             page_url = f"{url_prefix}/{i}"
@@ -141,9 +217,23 @@ def crawl_site(keywords: list[str], url_prefix: str, start_page: int = 0, end_pa
                     logging.debug(msg)
                 with urllib.request.urlopen(page_url) as response:
                     html_content = response.read().decode('utf-8')
-                parser = LinkTextExtractor(keywords, page_url)
-                parser.feed(html_content)
-                success = True
+                match(args.action):
+                    case "search":
+                        keywords = read_keywords_from_file(args.keywords_file)
+                        parser = LinkTextExtractor(keywords, page_url)
+
+                    case "list" | "extend_list":
+                        parser = SiteExporter(page_url, export_to_file, last_poll, append_mode)
+
+                    case _:
+                        raise ValueError(f"Unknown action: {args.action}")
+                
+                with parser:
+                    parser.feed(html_content)
+                    success = True
+                    if parser.is_done:
+                        logging.info(f"Reached end of data for {page_url}, stopping further requests.")
+                        break
 
             except urllib.error.URLError as e:
                 logging.error(f"Error visiting {page_url}: {e.reason}")
@@ -170,6 +260,11 @@ def crawl_site(keywords: list[str], url_prefix: str, start_page: int = 0, end_pa
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Crawl web pages to find links containing specific keywords."
+    )
+    parser.add_argument(
+        "--action",
+        default="search",
+        type=str,
     )
     parser.add_argument(
         "--keywords_file",
@@ -201,5 +296,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     logging.basicConfig(level=logging._nameToLevel[args.log_level.upper()], format='[%(levelname)s]: %(message)s')
-    keywords = read_keywords_from_file(args.keywords_file)
-    crawl_site(keywords, args.url_prefix, args.start, args.end)
+    crawl_site(args, args.url_prefix, args.start, args.end)

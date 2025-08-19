@@ -7,7 +7,7 @@
             "request": "launch",
             "cwd": "${workspaceFolder}/crawl",
             "program": "${file}",
-            "args": [ "--start", "30", "--end", "33"],
+            "args": [ "--end", "30", "--action", "list"],
             "console": "integratedTerminal"
         }
     ]
