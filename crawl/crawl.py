@@ -118,12 +118,6 @@ class SiteCrawler(HTMLParser):
                 self.current_title = data
                 self.handle_post_title(data)
 
-    def __enter__(self):
-        pass
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-
 
 class LinkTextExtractor(SiteCrawler):
     def __init__(self, substrings_to_find: list[str], current_url: str):
@@ -149,11 +143,11 @@ class LinkTextExtractor(SiteCrawler):
 
 
 class SiteExporter(SiteCrawler):
-    def __init__(self, current_url: str, file_path: str, last_poll, append_mode):
+    def __init__(self, current_url: str, out_file, last_poll, append_mode):
         super().__init__(current_url)
         self.last_poll = last_poll
         self.append_mode = append_mode
-        self.out_file = open(file_path, "a" if append_mode else "w", encoding="utf-8")
+        self.out_file = out_file
 
     def handle_post_title(self, data: str):
         if self.is_done:
@@ -178,9 +172,39 @@ class SiteExporter(SiteCrawler):
             return
         self.out_file.write(out_line + newline)
 
+
+class CrawlerFactory:
+    @abstractmethod
+    def create_crawler(self):
+        raise NotImplementedError()
+
+    def __enter__(self):
+        pass
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.out_file:
-            self.out_file.close()
+        pass
+    
+class LinkTextExtractorFactory(CrawlerFactory):
+    def __init__(self, keywords_file: str):
+        self.keywords = read_keywords_from_file(keywords_file)
+
+    def create_crawler(self, current_url: str):
+        return LinkTextExtractor(self.keywords, current_url)
+
+class SiteExporterFactory(CrawlerFactory):
+    def __init__(self, export_to_file: str, action: str):
+        self.append_mode = (action == "extend_list")
+        
+        if os.path.exists(export_to_file):
+            with open(export_to_file, 'r', encoding="utf-8") as file:
+                self.last_poll = file.readline()
+        else:
+            self.last_poll = None
+
+        self.out_file = open(export_to_file, "a" if self.append_mode else "w", encoding="utf-8")
+
+    def create_crawler(self, current_url: str):
+        return SiteExporter(current_url, self.out_file, self.last_poll, append_mode=self.append_mode)
 
 
 def read_keywords_from_file(filepath: str) -> list[str]:
@@ -195,64 +219,55 @@ def read_keywords_from_file(filepath: str) -> list[str]:
 def crawl_site(args, url_prefix: str, start_page: int = 0, end_page: int = 0):
     page_count = 0
     fail_pages = []
-    
-    if args.action == "list" or args.action == "extend_list":
-        export_to_file = "db.csv"
-        if os.path.exists(export_to_file):
-            with open(export_to_file, 'r', encoding="utf-8") as file:
-                last_poll = file.readline()
-        else:
-            last_poll = None
-        append_mode = (args.action == "extend_list")
 
-    try:
-        for i in range(start_page, end_page):
-            page_url = f"{url_prefix}/{i}"
-            success = False
-            try:
-                msg = f"opening page {page_url}"
-                if i % 10 == 0:
-                    logging.info(msg)
-                else:
-                    logging.debug(msg)
-                with urllib.request.urlopen(page_url) as response:
-                    html_content = response.read().decode('utf-8')
-                match(args.action):
-                    case "search":
-                        keywords = read_keywords_from_file(args.keywords_file)
-                        parser = LinkTextExtractor(keywords, page_url)
+    match(args.action):
+        case "search":
+            if not args.keywords_file:
+                raise ValueError("Keywords file must be specified for search action.")
+            crawler_factory = LinkTextExtractorFactory(args.keywords_file)
 
-                    case "list" | "extend_list":
-                        parser = SiteExporter(page_url, export_to_file, last_poll, append_mode)
+        case "list" | "extend_list":
+            crawler_factory = SiteExporterFactory("db.csv", args.action)
 
-                    case _:
-                        raise ValueError(f"Unknown action: {args.action}")
-                
-                with parser:
+    with crawler_factory:
+        try:
+            for i in range(start_page, end_page):
+                page_url = f"{url_prefix}/{i}"
+                success = False
+                try:
+                    msg = f"opening page {page_url}"
+                    if i % 10 == 0:
+                        logging.info(msg)
+                    else:
+                        logging.debug(msg)
+                    with urllib.request.urlopen(page_url) as response:
+                        html_content = response.read().decode('utf-8')
+                        
+                    parser = crawler_factory.create_crawler(current_url=page_url)
                     parser.feed(html_content)
                     success = True
                     if parser.is_done:
                         logging.info(f"Reached end of data for {page_url}, stopping further requests.")
                         break
 
-            except urllib.error.URLError as e:
-                logging.error(f"Error visiting {page_url}: {e.reason}")
-            except Exception as e:
-                logging.error(f"An unexpected error occurred for {page_url}: {e}")
-            finally:
-                if success:                
-                    page_count += 1
-                else:
-                    fail_pages.append(i)
+                except urllib.error.URLError as e:
+                    logging.error(f"Error visiting {page_url}: {e.reason}")
+                except Exception as e:
+                    logging.error(f"An unexpected error occurred for {page_url}: {e}")
+                finally:
+                    if success:                
+                        page_count += 1
+                    else:
+                        fail_pages.append(i)
 
-            # Wait for 10 seconds before the next request
-            if i < end_page - 1:
-                logging.debug(f"Waiting for 10 seconds before visiting the next page...")
-                time.sleep(10)
-    finally:
-        logging.info(f"{page_count} pages crawled")
-        if fail_pages:
-            logging.info(f"{len(fail_pages)} pages failed: [{', '.join(map(str, fail_pages))}]")
+                # Wait for 10 seconds before the next request
+                if i < end_page - 1:
+                    logging.debug(f"Waiting for 10 seconds before visiting the next page...")
+                    time.sleep(10)
+        finally:
+            logging.info(f"{page_count} pages crawled")
+            if fail_pages:
+                logging.info(f"{len(fail_pages)} pages failed: [{', '.join(map(str, fail_pages))}]")
 
     logging.info("Success")
 
