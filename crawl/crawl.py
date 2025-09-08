@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import shutil
 import time
 import urllib.request
 
@@ -159,8 +160,13 @@ class SiteExporter(SiteCrawler):
         
         if self.content_links:
             linked_file = self.content_links[0].split("/")[-1]
+            stripped_linked_file = linked_file.rstrip()
+            if len(stripped_linked_file) != len(linked_file):
+                logging.warning(f"Linked file name {linked_file} has trailing spaces, stripping to {stripped_linked_file}")
+                linked_file = stripped_linked_file
         else:
             linked_file = "N/A"
+            logging.error(f"No content links found for post: {self.current_title}")  
 
         if ";" in self.current_title:
             logging.warning(f"Title contains semicolon: {self.current_title}")
@@ -171,6 +177,7 @@ class SiteExporter(SiteCrawler):
             logging.info(f"Reached last poll {self.current_title}")
             return
         self.out_file.write(out_line + newline)
+        self.out_file.flush()
 
 
 class CrawlerFactory:
@@ -193,15 +200,22 @@ class LinkTextExtractorFactory(CrawlerFactory):
 
 class SiteExporterFactory(CrawlerFactory):
     def __init__(self, export_to_file: str, action: str):
-        self.append_mode = (action == "extend_list")
+        self.append_mode = (action == "append")
         
         if os.path.exists(export_to_file):
+            backup_path = export_to_file + ".bak"
+            
+            if os.path.exists(backup_path):
+                raise Exception(f"Backup file {backup_path} already exists. Please remove it before proceeding.")
+            
             with open(export_to_file, 'r', encoding="utf-8") as file:
-                self.last_poll = file.readline()
+                self.last_poll = file.readline().strip()
+
+            shutil.move(export_to_file, export_to_file + ".bak")
         else:
             self.last_poll = None
 
-        self.out_file = open(export_to_file, "a" if self.append_mode else "w", encoding="utf-8")
+        self.out_file = open(export_to_file, "w", encoding="utf-8")
 
     def create_crawler(self, current_url: str):
         return SiteExporter(current_url, self.out_file, self.last_poll, append_mode=self.append_mode)
@@ -226,7 +240,7 @@ def crawl_site(args, url_prefix: str, start_page: int = 0, end_page: int = 0):
                 raise ValueError("Keywords file must be specified for search action.")
             crawler_factory = LinkTextExtractorFactory(args.keywords_file)
 
-        case "list" | "extend_list":
+        case "list" | "append":
             crawler_factory = SiteExporterFactory("db.csv", args.action)
 
     with crawler_factory:
