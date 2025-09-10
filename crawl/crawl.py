@@ -203,10 +203,10 @@ class SiteExporterFactory(CrawlerFactory):
         self.append_mode = (action == "append")
         
         if os.path.exists(export_to_file):
-            backup_path = export_to_file + ".bak"
+            self.backup_path = export_to_file + ".bak"
             
-            if os.path.exists(backup_path):
-                raise Exception(f"Backup file {backup_path} already exists. Please remove it before proceeding.")
+            if os.path.exists(self.backup_path):
+                raise Exception(f"Backup file {self.backup_path} already exists. Please remove it before proceeding.")
             
             with open(export_to_file, 'r', encoding="utf-8") as file:
                 self.last_poll = file.readline().strip()
@@ -219,7 +219,14 @@ class SiteExporterFactory(CrawlerFactory):
 
     def create_crawler(self, current_url: str):
         return SiteExporter(current_url, self.out_file, self.last_poll, append_mode=self.append_mode)
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.out_file:
+            with open(self.backup_path, 'r', encoding="utf-8") as backup_file:
+                bak_content = backup_file.read()
 
+            self.out_file.write(bak_content)
+            self.out_file.close()
 
 def read_keywords_from_file(filepath: str) -> list[str]:
     keywords = []
